@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -277,13 +278,22 @@ func encodeForWrite(cfg *Config) (map[string]string, error) {
 }
 
 // commandArgs builds the `qm <action> <vmid> --key value ...` argument
-// list for the given options.
+// list for the given options, in sorted key order — options comes from a
+// Go map, so sorting is what makes the resulting argv deterministic
+// (stable logging/dry-run output, reproducible tests).
 func commandArgs(action string, vmid int, options map[string]string) []string {
+	keys := make([]string, 0, len(options))
+	for key := range options {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
 	args := make([]string, 0, 2+2*len(options))
 	args = append(args, action, strconv.Itoa(vmid))
 
-	for key, value := range options {
-		args = append(args, "--"+key, value)
+	for _, key := range keys {
+		args = append(args, "--"+key, options[key])
 	}
 
 	return args

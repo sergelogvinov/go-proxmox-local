@@ -30,3 +30,24 @@ import restqemu "github.com/sergelogvinov/go-proxmox-rest/nodes/qemu"
 // ten explicit HostPCI0…HostPCI9 fields, YAML-tagged) — see
 // docs/design.md §2 for the defects that struct had and this fixes.
 type Config = restqemu.Config
+
+// These are the Config field types a caller building or inspecting one
+// typically needs to name directly (a NUMA pinning entry, the CPU/Memory
+// settings, ...). Aliased here too, so a consumer never needs its own
+// import of go-proxmox-rest just to construct a *Config literal.
+
+// CPU is go-proxmox-rest's emulated-CPU-type/flags property (Config.CPU).
+type CPU = restqemu.CPU
+
+// HostPCI is go-proxmox-rest's PCI(e) passthrough entry (Config.HostPCI).
+type HostPCI = restqemu.HostPCI
+
+// Memory is go-proxmox-rest's guest memory configuration (Config.Memory).
+type Memory = restqemu.Memory
+
+// NUMA is go-proxmox-rest's per-NUMA-node CPU/memory pinning entry
+// (Config.NUMA).
+type NUMA = restqemu.NUMA
+
+// Tags is go-proxmox-rest's guest tag list (Config.Tags).
+type Tags = restqemu.Tags
