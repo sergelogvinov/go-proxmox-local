@@ -21,7 +21,9 @@ import (
 	"path/filepath"
 
 	"github.com/sergelogvinov/go-proxmox-local/cluster"
+	"github.com/sergelogvinov/go-proxmox-local/lxc"
 	"github.com/sergelogvinov/go-proxmox-local/qemu"
+	"github.com/sergelogvinov/go-proxmox-local/storage"
 )
 
 // Client is the entry point for driving a Proxmox VE hypervisor from the
@@ -72,10 +74,21 @@ func (c *Client) Cluster() *cluster.Client {
 	return cluster.New(c)
 }
 
-// Run executes a PVE CLI tool (pvecm, pvesh, or qm) through the
-// configured Runner. It is exported so the cluster and qemu subpackages
-// can invoke it via their own Env interfaces without importing this
-// package — see the package doc comment on Client.
+// LXC returns a handle for LXC container configuration and lifecycle
+// operations.
+func (c *Client) LXC() *lxc.Client {
+	return lxc.New(c)
+}
+
+// Storage returns a handle for local storage inspection.
+func (c *Client) Storage() *storage.Client {
+	return storage.New(c)
+}
+
+// Run executes a PVE CLI tool (pct, pvecm, pvesh, pvesm, or qm) through
+// the configured Runner. It is exported so the cluster, qemu, lxc and
+// storage subpackages can invoke it via their own Env interfaces without
+// importing this package — see the package doc comment on Client.
 func (c *Client) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return c.cfg.runner.Run(ctx, name, args...)
 }

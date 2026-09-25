@@ -44,7 +44,7 @@ type Logger interface {
 
 // pveBinaries are the only commands this module ever shells out to.
 // commandRunner resolves each to an absolute path once, at construction.
-var pveBinaries = []string{"pvecm", "pvesh", "qm"}
+var pveBinaries = []string{"pct", "pvecm", "pvesh", "pvesm", "qm"}
 
 // pveBinaryDirs are searched, in order, for each of pveBinaries — not
 // $PATH, since a root daemon should not inherit PATH-based binary

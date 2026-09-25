@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sergelogvinov/go-proxmox-local/lxc"
 	"github.com/sergelogvinov/go-proxmox-local/qemu"
 )
 
@@ -92,4 +93,37 @@ func TestFakeCreateThenUpdate(t *testing.T) {
 
 	_, err := client.Qemu().Get(context.Background(), 101)
 	require.Error(t, err, "guest should be gone after Delete")
+}
+
+func TestFakeLXCCreateThenUpdate(t *testing.T) {
+	f := New(t, WithLXCGuest(200, "hostname: other-ct\n"))
+	client := f.Client()
+
+	cores := 2
+	cfg := &lxc.Config{Hostname: "web-1", Cores: &cores}
+
+	require.NoError(t, client.LXC().Create(context.Background(), 201, "local:vztmpl/debian-12-standard_12.2-1_amd64.tar.zst", cfg))
+	f.AssertRan("pct", "create", "201", "local:vztmpl/debian-12-standard_12.2-1_amd64.tar.zst", "--cores", "2", "--hostname", "web-1")
+
+	got := f.LXCGuest(201)
+	assert.Equal(t, "web-1", got.Hostname)
+	require.NotNil(t, got.Cores)
+	assert.Equal(t, 2, *got.Cores)
+
+	// The other container WithLXCGuest seeded is untouched.
+	other := f.LXCGuest(200)
+	assert.Equal(t, "other-ct", other.Hostname)
+
+	newCores := 4
+	require.NoError(t, client.LXC().Update(context.Background(), 201, &lxc.Config{Hostname: "web-1", Cores: &newCores}))
+
+	updated := f.LXCGuest(201)
+	require.NotNil(t, updated.Cores)
+	assert.Equal(t, 4, *updated.Cores)
+
+	require.NoError(t, client.LXC().Delete(context.Background(), 201))
+	f.AssertRan("pct", "destroy", "201")
+
+	_, err := client.LXC().Get(context.Background(), 201)
+	require.Error(t, err, "container should be gone after Delete")
 }

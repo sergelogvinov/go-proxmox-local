@@ -42,6 +42,7 @@ import (
 
 	local "github.com/sergelogvinov/go-proxmox-local"
 	"github.com/sergelogvinov/go-proxmox-local/conf"
+	"github.com/sergelogvinov/go-proxmox-local/lxc"
 	"github.com/sergelogvinov/go-proxmox-local/qemu"
 )
 
@@ -70,16 +71,28 @@ func WithNextID(id int) Option {
 	return func(f *Fake) { f.nextID = id }
 }
 
-// WithGuest seeds the fake root with a guest config file, exactly as a
-// real /etc/pve/qemu-server/<vmid>.conf would read — content is written
-// verbatim, so it can carry a description, a [PENDING] section or
-// snapshots, same as any conf-package test fixture.
+// WithGuest seeds the fake root with a QEMU guest config file, exactly
+// as a real /etc/pve/qemu-server/<vmid>.conf would read — content is
+// written verbatim, so it can carry a description, a [PENDING] section
+// or snapshots, same as any conf-package test fixture.
 func WithGuest(vmid int, content string) Option {
 	return func(f *Fake) {
 		f.t.Helper()
 
-		if err := os.WriteFile(f.guestPath(vmid), []byte(content), 0o600); err != nil {
+		if err := os.WriteFile(f.guestPath("qemu-server", vmid), []byte(content), 0o600); err != nil {
 			f.t.Fatalf("fakelocal: WithGuest(%d): %v", vmid, err)
+		}
+	}
+}
+
+// WithLXCGuest seeds the fake root with an LXC container config file,
+// exactly as a real /etc/pve/lxc/<vmid>.conf would read. See WithGuest.
+func WithLXCGuest(vmid int, content string) Option {
+	return func(f *Fake) {
+		f.t.Helper()
+
+		if err := os.WriteFile(f.guestPath("lxc", vmid), []byte(content), 0o600); err != nil {
+			f.t.Fatalf("fakelocal: WithLXCGuest(%d): %v", vmid, err)
 		}
 	}
 }
@@ -90,8 +103,10 @@ func New(t testing.TB, opts ...Option) *Fake {
 
 	f := &Fake{t: t, root: t.TempDir(), quorum: true, nextID: 100}
 
-	if err := os.MkdirAll(filepath.Join(f.root, "etc", "pve", "qemu-server"), 0o755); err != nil {
-		t.Fatalf("fakelocal: %v", err)
+	for _, subdir := range []string{"qemu-server", "lxc"} {
+		if err := os.MkdirAll(filepath.Join(f.root, "etc", "pve", subdir), 0o755); err != nil {
+			t.Fatalf("fakelocal: %v", err)
+		}
 	}
 
 	for _, opt := range opts {
@@ -116,14 +131,28 @@ func (f *Fake) Client() *local.Client {
 	return c
 }
 
-// Guest reads back vmid's config through the real read path (Get), for
-// asserting on the effect of a create/update the code under test made.
+// Guest reads back vmid's QEMU config through the real read path (Get),
+// for asserting on the effect of a create/update the code under test
+// made.
 func (f *Fake) Guest(vmid int) *qemu.Config {
 	f.t.Helper()
 
 	cfg, err := f.Client().Qemu().Get(context.Background(), vmid)
 	if err != nil {
 		f.t.Fatalf("fakelocal: Guest(%d): %v", vmid, err)
+	}
+
+	return cfg
+}
+
+// LXCGuest reads back vmid's LXC container config through the real read
+// path (Get). See Guest.
+func (f *Fake) LXCGuest(vmid int) *lxc.Config {
+	f.t.Helper()
+
+	cfg, err := f.Client().LXC().Get(context.Background(), vmid)
+	if err != nil {
+		f.t.Fatalf("fakelocal: LXCGuest(%d): %v", vmid, err)
 	}
 
 	return cfg
@@ -182,14 +211,17 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 		return f.runPvesh(args)
 	case "qm":
 		return f.runQM(args)
+	case "pct":
+		return f.runPCT(args)
 	default:
 		return nil, fmt.Errorf("fakelocal: unknown command %q", name)
 	}
 }
 
-// guestPath returns the fake tree's on-disk path for vmid's config file.
-func (f *Fake) guestPath(vmid int) string {
-	return filepath.Join(f.root, "etc", "pve", "qemu-server", strconv.Itoa(vmid)+".conf")
+// guestPath returns the fake tree's on-disk path for vmid's config file
+// under the given pmxcfs subdirectory ("qemu-server" or "lxc").
+func (f *Fake) guestPath(subdir string, vmid int) string {
+	return filepath.Join(f.root, "etc", "pve", subdir, strconv.Itoa(vmid)+".conf")
 }
 
 func (f *Fake) runPvecm(args []string) ([]byte, error) {
@@ -219,22 +251,52 @@ func (f *Fake) runPvesh(args []string) ([]byte, error) {
 }
 
 // runQM interprets `qm create/set/destroy <vmid> [--key value ...]`
-// against the fake tree: create/set merge the given flags into the
-// guest's existing config (if any) and rewrite the file; destroy removes
-// it.
+// against the fake tree.
 func (f *Fake) runQM(args []string) ([]byte, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("fakelocal: qm: missing action/vmid")
 	}
 
-	action, vmidStr := args[0], args[1]
-
-	vmid, err := strconv.Atoi(vmidStr)
+	vmid, err := strconv.Atoi(args[1])
 	if err != nil {
-		return nil, fmt.Errorf("fakelocal: qm: invalid vmid %q", vmidStr)
+		return nil, fmt.Errorf("fakelocal: qm: invalid vmid %q", args[1])
 	}
 
-	path := f.guestPath(vmid)
+	return f.runGuestCommand("qemu-server", args[0], vmid, args[2:])
+}
+
+// runPCT interprets `pct create <vmid> <ostemplate> [--key value ...]` /
+// `pct set/destroy <vmid> [--key value ...]` against the fake tree. The
+// fake ignores ostemplate entirely (it never actually provisions a
+// container's filesystem) — only the resulting config file matters to a
+// consumer test.
+func (f *Fake) runPCT(args []string) ([]byte, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("fakelocal: pct: missing action/vmid")
+	}
+
+	vmid, err := strconv.Atoi(args[1])
+	if err != nil {
+		return nil, fmt.Errorf("fakelocal: pct: invalid vmid %q", args[1])
+	}
+
+	flagsFrom := 2
+	if args[0] == "create" {
+		flagsFrom = 3 // args[2] is the ostemplate, not a --flag
+	}
+
+	return f.runGuestCommand("lxc", args[0], vmid, args[flagsFrom:])
+}
+
+// runGuestCommand interprets a `create/set/destroy <vmid> [--key value
+// ...]` action against the fake tree, under the given pmxcfs
+// subdirectory: create/set merge the given flags into the guest's
+// existing config (if any) and rewrite the file; destroy removes it.
+// Shared by runQM and runPCT, whose only difference is the subdirectory
+// and (for pct create) an extra positional argument already stripped by
+// the caller.
+func (f *Fake) runGuestCommand(subdir, action string, vmid int, flagArgs []string) ([]byte, error) {
+	path := f.guestPath(subdir, vmid)
 
 	switch action {
 	case "destroy":
@@ -247,13 +309,13 @@ func (f *Fake) runQM(args []string) ([]byte, error) {
 	case "create", "set":
 		description, fields := f.readGuest(path)
 
-		for key, value := range parseFlags(args[2:]) {
+		for key, value := range parseFlags(flagArgs) {
 			switch key {
 			case "description":
 				description = value
 			case "digest":
-				// qm's optimistic-concurrency argument; the fake does not
-				// enforce it — nothing to fake here without a real
+				// qm/pct's optimistic-concurrency argument; the fake does
+				// not enforce it — nothing to fake here without a real
 				// concurrent writer.
 			default:
 				fields[key] = value
@@ -267,7 +329,7 @@ func (f *Fake) runQM(args []string) ([]byte, error) {
 		return nil, nil
 
 	default:
-		return nil, fmt.Errorf("fakelocal: qm: unsupported action %q", action)
+		return nil, fmt.Errorf("fakelocal: unsupported action %q", action)
 	}
 }
 
