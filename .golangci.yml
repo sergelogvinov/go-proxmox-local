@@ -61,6 +61,8 @@ linters:
     - goconst
     - exhaustruct_v5
     - exhaustive
+    - nlreturn
+    - wsl_v5
   settings:
     revive:
       enable-default-rules: true
