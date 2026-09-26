@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/sergelogvinov/go-proxmox-local/compare/v0.1.0...v0.1.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* gh actions ([e7040ad](https://github.com/sergelogvinov/go-proxmox-local/commit/e7040adb80cdff3e458ba05a921507c7f806bd01))
+
 ## [0.1.0](https://github.com/sergelogvinov/go-proxmox-local/compare/v0.0.1...v0.1.0) (2026-09-25)
 
 
