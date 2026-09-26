@@ -376,7 +376,9 @@ func renderGuest(description string, fields map[string]string) []byte {
 
 	if description != "" {
 		for line := range strings.SplitSeq(description, "\n") {
-			b.WriteString("#" + line + "\n")
+			b.WriteString("#")
+			b.WriteString(line)
+			b.WriteString("\n")
 		}
 	}
 
@@ -388,7 +390,10 @@ func renderGuest(description string, fields map[string]string) []byte {
 	sort.Strings(keys)
 
 	for _, k := range keys {
-		b.WriteString(k + ": " + fields[k] + "\n")
+		b.WriteString(k)
+		b.WriteString(": ")
+		b.WriteString(fields[k])
+		b.WriteString("\n")
 	}
 
 	return []byte(b.String())

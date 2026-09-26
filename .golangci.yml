@@ -55,12 +55,8 @@ linters:
     - gomodguard
 
     # temporarily disabled linters
-    - copyloopvar
-    - intrange
     - noinlineerr
-    - goconst
     - exhaustruct_v5
-    - exhaustive
     - nlreturn
     - wsl_v5
   settings:
