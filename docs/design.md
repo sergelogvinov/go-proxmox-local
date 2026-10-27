@@ -69,14 +69,14 @@ go-proxmox-local
 │   └── cluster.go          // Quorate (pvecm), NextID (pvesh) — still forks; see §12
 ├── qemu/
 │   ├── qemu.go             // Client: Get, List, ConfigFile, Create, Update, Delete
-│   ├── config.go           // DecodeConfig/EncodeConfig — this module's own codec (§6.4)
+│   ├── config.go           // DecodeConfig/EncodeConfig — thin wrappers over internal/params and restqemu.EncodeConfig
 │   ├── lifecycle.go        // Start, Stop, Reboot (qm)
 │   ├── process.go          // ParseVfioPCIDevices(cmdlineArgs) — no /run/qemu-server
 │   │                       //   pid scanning yet (§12)
 │   └── types.go            // Config, CPU, HostPCI, Memory, NUMA, Tags — aliases
 ├── lxc/                    // mirrors qemu/'s shape, for containers
 │   ├── lxc.go              // Client: Get, List, ConfigFile, Create, Update, Delete (pct)
-│   ├── config.go           // DecodeConfig/EncodeConfig, this module's own codec
+│   ├── config.go           // DecodeConfig/EncodeConfig — thin wrappers over internal/params and restlxc.EncodeConfig
 │   └── types.go            // Config, Features, MountPoint, Net, RootFS — aliases
 ├── storage/
 │   └── storage.go          // Client: Status (pvesm status), List (pvesm list)
@@ -241,10 +241,16 @@ and from tagged structs (`cfg:"name[,default]"` tags). The original plan (§6.4 
 to reuse this as-is by promoting it to a public package upstream. That didn't happen, so
 `go-proxmox-local/internal/property` is a **copy** of it, and
 `go-proxmox-local/internal/params` is a **port** of `go-proxmox-rest/internal/params` (the
-reflection-based `url`-tag encoder/decoder `DecodeConfig`/`EncodeConfig` need for the
-*ordinary* named fields — the property-string handling for individual indexed entries
-comes for free from each `restqemu`/`restlxc` type's own exported `UnmarshalJSON`/
-`String()` methods instead. As a result `internal/property` currently has **no callers
+reflection-based `url`-tag encoder/decoder `DecodeConfig`/`EncodeConfig` are built on;
+it handles the indexed families such as `net0`/`scsi1`/`mp2` through their `,indexed`
+tags, so it must track upstream whenever `restqemu`/`restlxc.Config` gains a new tag
+modifier). `qemu.EncodeConfig` and `lxc.EncodeConfig` call `go-proxmox-rest`'s exported
+`EncodeConfig` directly; `go-proxmox-rest` exports no decoder, so decoding still goes
+through the port. Because `Update` decodes with the port and encodes with upstream, the
+two copies must stay identical: `internal/params`'s `TestMatchesUpstream` diffs every
+source file against the pinned `go-proxmox-rest` module and fails on any drift. The property-string handling for individual entries comes for free
+from each `restqemu`/`restlxc` type's own exported `UnmarshalJSON`/`String()` methods.
+As a result `internal/property` currently has **no callers
 outside its own tests** in this module — it was copied in ahead of a codec that ended up
 not needing it directly. Kept rather than deleted on the assumption a future `qm`/`pct`
 subcommand wrapper will need to build or parse a property string directly, the way

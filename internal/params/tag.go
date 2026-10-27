@@ -39,6 +39,15 @@ import "strings"
 //   - "writeonly": Decode never populates this field. For parameters that
 //     only make sense on a write (a rename target, a delete-list) and
 //     never appear in a GET response.
+//   - "indexed": the field is one of Proxmox's numerically-suffixed
+//     families (net0, net1, scsi3, ...) and must be a map with an integer
+//     key. Each entry travels as its own name+index key: Encode sends one
+//     parameter per map entry (always, like a non-nil pointer, since
+//     presence in the map is the caller's intent), and Decode collects
+//     every response key made of the name followed by only digits, so
+//     "virtio" never claims "virtiofs0". Each value is encoded/decoded
+//     exactly as a scalar field of the map's element type would be — a
+//     property-string type's String/UnmarshalJSON included.
 //   - "omitempty": accepted for symmetry with the sibling `json` tag, and
 //     for readability. Encode already skips zero-valued, non-pointer
 //     fields unconditionally, and Decode already skips absent JSON keys
@@ -52,22 +61,32 @@ import "strings"
 // merge") for when a resource's read and write shapes are close enough to
 // share one struct using these modifiers, versus when they should stay
 // separate types.
-func parseTag(tag string) (name string, readonly, writeonly, ok bool) {
+func parseTag(tag string) (t fieldTag, ok bool) {
 	if tag == "" || tag == "-" {
-		return "", false, false, false
+		return fieldTag{}, false
 	}
 
 	parts := strings.Split(tag, ",")
-	name = parts[0]
+	t.name = parts[0]
 
 	for _, mod := range parts[1:] {
 		switch mod {
 		case "readonly":
-			readonly = true
+			t.readonly = true
 		case "writeonly":
-			writeonly = true
+			t.writeonly = true
+		case "indexed":
+			t.indexed = true
 		}
 	}
 
-	return name, readonly, writeonly, true
+	return t, true
+}
+
+// fieldTag is a parsed `url` struct tag; see parseTag.
+type fieldTag struct {
+	name      string
+	readonly  bool
+	writeonly bool
+	indexed   bool
 }

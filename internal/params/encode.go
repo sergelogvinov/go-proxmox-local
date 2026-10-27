@@ -31,6 +31,7 @@ limitations under the License.
 //   - bool: sent as "1" when true; skipped when false.
 //   - int/float: skipped when zero.
 //   - []string: comma-joined, skipped when empty.
+//   - map[int]T tagged "indexed": one name+index parameter per entry.
 //   - a field tagged "readonly" is never sent, regardless of its value.
 package params
 
@@ -64,12 +65,20 @@ func Encode(v any) (map[string]string, error) {
 			continue
 		}
 
-		name, readonly, _, ok := parseTag(f.Tag.Get("url"))
-		if !ok || readonly {
+		tag, ok := parseTag(f.Tag.Get("url"))
+		if !ok || tag.readonly {
 			continue
 		}
 
 		fv := rv.Field(i)
+
+		if tag.indexed {
+			if err := encodeIndexed(params, tag.name, fv); err != nil {
+				return nil, fmt.Errorf("params: field %s: %w", f.Name, err)
+			}
+
+			continue
+		}
 
 		// Pointers are encoded iff non-nil; the pointed-to value is
 		// always sent so callers can express "set to zero/empty".
@@ -81,12 +90,52 @@ func Encode(v any) (map[string]string, error) {
 			fv = fv.Elem()
 		}
 
-		if err := encodeField(params, name, fv, isPtr); err != nil {
+		if err := encodeField(params, tag.name, fv, isPtr); err != nil {
 			return nil, fmt.Errorf("params: field %s: %w", f.Name, err)
 		}
 	}
 
 	return params, nil
+}
+
+// encodeIndexed encodes an "indexed" map field as one name+index
+// parameter per entry. Entries are always sent, like a non-nil pointer:
+// putting a key in the map is how a caller asks for that slot to be set.
+func encodeIndexed(params map[string]string, name string, fv reflect.Value) error {
+	if !isIndexedMap(fv.Type()) {
+		return fmt.Errorf("indexed field must be a map with an integer key, got %s", fv.Type())
+	}
+
+	iter := fv.MapRange()
+	for iter.Next() {
+		key := name + strconv.FormatInt(iter.Key().Int(), 10)
+
+		// Copy the value so encodeField can reach a pointer-receiver
+		// String method, which map values (not addressable) would hide.
+		v := reflect.New(iter.Value().Type()).Elem()
+		v.Set(iter.Value())
+
+		if err := encodeField(params, key, v, true); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+	}
+
+	return nil
+}
+
+// isIndexedMap reports whether t can back an "indexed" field: a map
+// keyed by a signed integer.
+func isIndexedMap(t reflect.Type) bool {
+	if t.Kind() != reflect.Map {
+		return false
+	}
+
+	switch t.Key().Kind() { //nolint:exhaustive
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return true
+	default:
+		return false
+	}
 }
 
 // encodeField encodes a single (already dereferenced) field value.

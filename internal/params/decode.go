@@ -120,10 +120,21 @@ func decodeStruct(raw json.RawMessage, rv reflect.Value) error {
 			continue
 		}
 
-		name, _, writeonly, ok := parseTag(f.Tag.Get("url"))
-		if !ok || writeonly {
+		tag, ok := parseTag(f.Tag.Get("url"))
+		if !ok || tag.writeonly {
 			continue
 		}
+
+		name := tag.name
+
+		if tag.indexed {
+			if err := decodeIndexed(m, name, rv.Field(i)); err != nil {
+				return fmt.Errorf("field %s: %w", f.Name, err)
+			}
+
+			continue
+		}
+
 		if name == "" {
 			if f.Anonymous {
 				// An embedded field with no explicit wire name (a bare
@@ -147,6 +158,41 @@ func decodeStruct(raw json.RawMessage, rv reflect.Value) error {
 		if err := decodeValue(item, rv.Field(i)); err != nil {
 			return fmt.Errorf("field %s: %w", f.Name, err)
 		}
+	}
+
+	return nil
+}
+
+// decodeIndexed collects every key in m made of name followed by only
+// digits (net0, net12, but not virtiofs0 for name "virtio") into the
+// "indexed" map field rv, decoding each value as its element type. rv is
+// left nil when no key matches.
+func decodeIndexed(m map[string]json.RawMessage, name string, rv reflect.Value) error {
+	if !isIndexedMap(rv.Type()) {
+		return fmt.Errorf("indexed field must be a map with an integer key, got %s", rv.Type())
+	}
+
+	for key, raw := range m {
+		suffix, found := strings.CutPrefix(key, name)
+		if !found || suffix == "" || strings.Trim(suffix, "0123456789") != "" {
+			continue
+		}
+
+		index, err := strconv.ParseInt(suffix, 10, rv.Type().Key().Bits())
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+
+		elem := reflect.New(rv.Type().Elem()).Elem()
+		if err := decodeValue(raw, elem); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+
+		if rv.IsNil() {
+			rv.Set(reflect.MakeMap(rv.Type()))
+		}
+
+		rv.SetMapIndex(reflect.ValueOf(index).Convert(rv.Type().Key()), elem)
 	}
 
 	return nil
