@@ -103,30 +103,8 @@ func (o WatchOptions) delay(attempt int) time.Duration {
 // The handler is called from Watch's goroutine, one call at a time,
 // never concurrently.
 //
-// A create or write of <vmid>.pid only has Watch look at the guest
-// again. VMStarted(vmid, pid) is called once the guest runs as pid by the
-// same check List's Status uses (the pid file holds a positive PID whose
-// command line has "-id <vmid>"), and only if pid is not the PID last
-// reported for that guest: a new PID is a restart and reported again.
-// An empty or unparsable pid file, or a command line of another process,
-// is "not started yet": the guest is looked at again with backoff, up
-// to MaxRetries times.
-//
-// A VMStarted error is retried with backoff, up to MaxRetries times. Each
-// retry checks the guest again first, and is dropped if it no longer runs
-// as that PID. A file event replaces a guest's pending look; it keeps a
-// pending retry whose PID the guest still runs as, with its backoff.
-//
-// A removal of <vmid>.pid calls VMStopped(vmid) and forgets the guest's
-// reported PID and pending look. A pid file left behind by a dead process
-// gets no VMStopped; the next sync leaves the guest out.
-//
-// A sync runs at start, every SyncInterval, and after a watcher error
-// (events may have been lost). It lists the running guests as List does,
-// templates skipped, and passes them to VMsRunning. Their PIDs count as
-// reported, so a later write of the same PID is no VM start. A failed
-// or partial list (a *ListError) calls nothing and is retried with
-// backoff, up to MaxRetries times.
+// What counts as a VM start, and how retries, stops and syncs work, is
+// in docs/design.md, "The watch loop".
 func (c *Client) Watch(ctx context.Context, handler EventHandler, opts WatchOptions) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -156,7 +134,7 @@ func (c *Client) Watch(ctx context.Context, handler EventHandler, opts WatchOpti
 		tick = ticker.C
 	}
 
-	w.sync(ctx)
+	w.startSync(ctx)
 
 	retry := time.NewTimer(0)
 	defer retry.Stop()
@@ -169,7 +147,7 @@ func (c *Client) Watch(ctx context.Context, handler EventHandler, opts WatchOpti
 			return nil
 
 		case <-tick:
-			w.sync(ctx)
+			w.startSync(ctx)
 
 		case <-retry.C:
 			w.retryDue(ctx)
@@ -188,7 +166,7 @@ func (c *Client) Watch(ctx context.Context, handler EventHandler, opts WatchOpti
 
 			// Events may have been lost (an inotify queue overflow, say):
 			// a sync tells the handler what runs.
-			w.sync(ctx)
+			w.startSync(ctx)
 		}
 	}
 }
@@ -200,7 +178,7 @@ type watchLoop struct {
 	opts    WatchOptions
 
 	// reported is the PID last reported as started, or seen running by a
-	// sync, for each guest.
+	// sync while no look was pending, for each guest.
 	reported map[int]int
 	// pending is each guest's next look, if one is due.
 	pending map[int]*pendingStart
@@ -242,7 +220,7 @@ func (w *watchLoop) retryDue(ctx context.Context) {
 	if !w.syncDue.IsZero() && !w.syncDue.After(now) {
 		w.syncDue = time.Time{}
 		w.syncAttempts++
-		w.retrySync(ctx)
+		w.sync(ctx)
 	}
 
 	for vmid, p := range w.pending {
@@ -290,7 +268,7 @@ func (w *watchLoop) fileEvent(ctx context.Context, event fsnotify.Event) {
 		// A file event replaces the guest's pending look, unless that is a
 		// retry of the start the file still names: that keeps its backoff.
 		if p := w.pending[vmid]; p != nil && p.pid != 0 {
-			if status, pid := w.client.status(vmid); status == VMStatusRunning && pid == p.pid {
+			if w.runsAs(vmid, p.pid) {
 				return
 			}
 		}
@@ -304,16 +282,19 @@ func (w *watchLoop) fileEvent(ctx context.Context, event fsnotify.Event) {
 // and reports the start if so. prev is the pending look this one retries,
 // nil for a fresh one.
 func (w *watchLoop) look(ctx context.Context, vmid int, prev *pendingStart) {
-	status, pid := w.client.status(vmid)
+	var pid int
 
 	if prev != nil && prev.pid != 0 {
 		// A retry of a failed VMStarted: dropped unless the guest still
 		// runs as that PID.
-		if status != VMStatusRunning || pid != prev.pid {
+		if !w.runsAs(vmid, prev.pid) {
 			return
 		}
+
+		pid = prev.pid
 	} else {
-		if status != VMStatusRunning {
+		var status VMStatus
+		if status, pid = w.client.status(vmid); status != VMStatusRunning {
 			// Not started yet.
 			w.schedule(vmid, 0, prev)
 
@@ -334,17 +315,26 @@ func (w *watchLoop) look(ctx context.Context, vmid int, prev *pendingStart) {
 	w.reported[vmid] = pid
 }
 
-// sync passes the running guests to the handler, and seeds the reported
-// PIDs with them. A failed sync, a partial list included, tells the
-// handler nothing and is retried with backoff.
-func (w *watchLoop) sync(ctx context.Context) {
-	w.syncDue = time.Time{}
-	w.syncAttempts = 0
-	w.retrySync(ctx)
+// runsAs reports whether guest vmid runs as process pid, by the check
+// List's Status uses.
+func (w *watchLoop) runsAs(vmid, pid int) bool {
+	status, running := w.client.status(vmid)
+
+	return status == VMStatusRunning && running == pid
 }
 
-// retrySync is sync, as retry number syncAttempts.
-func (w *watchLoop) retrySync(ctx context.Context) {
+// startSync runs a new sync, dropping a failed sync's pending retry.
+func (w *watchLoop) startSync(ctx context.Context) {
+	w.syncDue = time.Time{}
+	w.syncAttempts = 0
+	w.sync(ctx)
+}
+
+// sync passes the running guests to the handler, and seeds the reported
+// PIDs of those with no pending look: a pending look reports its own
+// start. A failed sync, a partial list included, tells the handler nothing
+// and is retried with backoff, as retry number syncAttempts.
+func (w *watchLoop) sync(ctx context.Context) {
 	guests, err := w.client.List(ctx, ListFilter{Status: VMStatusRunning, SkipTemplates: true})
 	if err != nil {
 		if w.syncAttempts < w.opts.MaxRetries {
@@ -357,7 +347,10 @@ func (w *watchLoop) retrySync(ctx context.Context) {
 	running := make(map[int]int, len(guests))
 	for _, g := range guests {
 		running[g.VMID] = g.PID
-		w.reported[g.VMID] = g.PID
+
+		if _, ok := w.pending[g.VMID]; !ok {
+			w.reported[g.VMID] = g.PID
+		}
 	}
 
 	w.handler.VMsRunning(ctx, running)
