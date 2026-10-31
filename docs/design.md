@@ -71,8 +71,9 @@ go-proxmox-local
 │   ├── qemu.go             // Client: Get, List, ConfigFile, Create, Update, Delete
 │   ├── config.go           // DecodeConfig/EncodeConfig — thin wrappers over internal/params and restqemu.EncodeConfig
 │   ├── lifecycle.go        // Start, Stop, Reboot (qm)
-│   ├── process.go          // ParseVfioPCIDevices(cmdlineArgs) — no /run/qemu-server
-│   │                       //   pid scanning yet (§12)
+│   ├── process.go          // ParseVfioPCIDevices(cmdlineArgs)
+│   ├── status.go           // running state from run/qemu-server/*.pid + proc/<pid>/cmdline,
+│   │                       //   VMStatus aliases, ListError
 │   └── types.go            // Config, CPU, HostPCI, Memory, NUMA, Tags — aliases
 ├── lxc/                    // mirrors qemu/'s shape, for containers
 │   ├── lxc.go              // Client: Get, List, ConfigFile, Create, Update, Delete (pct)
@@ -82,7 +83,7 @@ go-proxmox-local
 │   └── storage.go          // Client: Status (pvesm status), List (pvesm list)
 ├── fakelocal/              // public test double: temp root + scripted Runner
 │   └── fakelocal.go        // interprets qm/pct create|set|destroy, pvecm status,
-│                           //   pvesh get /cluster/nextid
+│                           //   pvesh get /cluster/nextid; seeds running guests
 ├── internal/
 │   ├── errdefs/            // sentinel errors, shared by root+subpackages without a cycle
 │   ├── params/             // ported from go-proxmox-rest/internal/params (§6.4)
@@ -142,11 +143,17 @@ type Runner interface {
 ```go
 // Paths are derived from a single root so a test can point the whole library
 // at t.TempDir(). Individual directories can still be overridden, in either
-// option order — an explicit WithConfigDir/WithRunDir always wins.
+// option order — an explicit WithConfigDir/WithRunDir/WithProcDir always wins.
 WithRoot("/")                          // default
 WithConfigDir("/etc/pve")              // pmxcfs mount
 WithRunDir("/run/qemu-server")         // pid/vnc/qmp sockets
+WithProcDir("/proc")                   // a running guest's QEMU process
 ```
+
+A guest runs when `<run dir>/<vmid>.pid` holds a positive PID and
+`<proc dir>/<pid>/cmdline` is that guest's QEMU (an `-id <vmid>` argument), so a pid file
+left behind with a reused PID reads as stopped. Under `WithRoot`, `/proc` moves with the
+rest, so a test seeds a running guest without a real process.
 
 The default `Runner` (`commandRunner` in `exec.go`):
 
@@ -362,11 +369,13 @@ What `fakelocal` provides today:
 - `WithGuest`/`WithLXCGuest` to seed a guest's initial config file verbatim (so it can
   carry a description, `[PENDING]`, snapshots — anything `conf`'s own testdata corpus
   covers).
+- `WithRunning(vmid, pid)` to seed a running QEMU guest: its `run/qemu-server/<vmid>.pid`
+  and a `proc/<pid>/cmdline` naming it.
 
-What it does *not* provide (open items, §12): `etc/pve/.members`/`.vmlist`,
-`run/qemu-server/*.pid`, and fault injection (a scripted command failure/lock
+What it does *not* provide (open items, §12): `etc/pve/.members`/`.vmlist`, the running
+state of LXC containers, and fault injection (a scripted command failure/lock
 error/hang) — none of these have a caller yet, since `cluster` doesn't read `.members`/
-`.vmlist` and no process-discovery method exists to fail.
+`.vmlist` and nothing asks whether a container runs.
 
 `conf` has its own table-driven round-trip tests over a corpus of real configs in
 `testdata/` (a plain config, a multi-line description, `[PENDING]`, one snapshot,
@@ -436,12 +445,17 @@ id,  err := client.Cluster().NextID(ctx)
 cfg,  err := client.Qemu().Get(ctx, 100)          // *qemu.Config = *restqemu.Config
 file, err := client.Qemu().ConfigFile(ctx, 100)   // *conf.File: sections, order, digest
 guests, err := client.Qemu().List(ctx, qemu.ListFilter{
-    Name: "node-capacity",
+    Name:          "node-capacity",
+    Status:        qemu.VMStatusRunning,           // "" = any; or qemu.VMStatusStopped
+    SkipTemplates: true,
     Match: func(c *qemu.Config) (bool, error) {
         return c.Tags != nil && slices.Contains(*c.Tags, "karpenter"), nil
     },
-})                                                 // []qemu.Guest{VMID, Config}; empty, not
-                                                    //   an error, when nothing matches
+})                                                 // []qemu.Guest{VMID, Config, Status, PID},
+                                                    //   in VMID order; empty, not an error,
+                                                    //   when nothing matches. Configs that
+                                                    //   can't be read: partial result plus a
+                                                    //   *qemu.ListError naming them
 
 // qemu — lifecycle (always via qm)
 err = client.Qemu().Create(ctx, vmid, cfg)         // qm create

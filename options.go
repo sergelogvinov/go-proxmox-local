@@ -23,6 +23,7 @@ type config struct {
 	root      string
 	configDir string
 	runDir    string
+	procDir   string
 	runner    Runner
 	logger    Logger
 	timeout   time.Duration
@@ -32,10 +33,10 @@ type config struct {
 // Option mutates a Client's construction-time configuration.
 type Option func(*config)
 
-// WithRoot points every default path (config dir, run dir) at root
-// instead of "/" — e.g. WithRoot(t.TempDir()) in a test. It can be
-// combined, in either order, with WithConfigDir/WithRunDir: an explicit
-// directory always wins over the root-derived default.
+// WithRoot points every default path (config dir, run dir, proc dir) at
+// root instead of "/" — e.g. WithRoot(t.TempDir()) in a test. It can be
+// combined, in either order, with WithConfigDir/WithRunDir/WithProcDir: an
+// explicit directory always wins over the root-derived default.
 func WithRoot(root string) Option {
 	return func(c *config) { c.root = root }
 }
@@ -50,6 +51,12 @@ func WithConfigDir(dir string) Option {
 // pid/vnc/qmp sockets (default: "<root>/run/qemu-server").
 func WithRunDir(dir string) Option {
 	return func(c *config) { c.runDir = dir }
+}
+
+// WithProcDir overrides the procfs mount a running guest's QEMU process
+// is looked up in (default: "<root>/proc").
+func WithProcDir(dir string) Option {
+	return func(c *config) { c.procDir = dir }
 }
 
 // WithRunner overrides the default exec.CommandContext-based Runner —
