@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -400,6 +401,44 @@ func TestWatchSyncKeepsPendingStart(t *testing.T) {
 	w.barrier()
 
 	assert.Contains(t, w.events(), "start 100 4100")
+}
+
+// TestWatchSyncReportsUnreportedStart checks that a sync after the first
+// reports a VM start its file events did not: here the look gave up before
+// the process showed up, as when a sync wins the race with queued events.
+func TestWatchSyncReportsUnreportedStart(t *testing.T) {
+	f := fakelocal.New(t, fakelocal.WithGuest(100, "name: vm100\n"))
+
+	opts := watchOptions()
+	opts.SyncInterval = 10 * time.Millisecond
+	opts.MaxRetries = 0 // the look gives up at once
+
+	w := startWatch(t, f, opts)
+
+	f.WritePIDFile(100, "4100\n") // no process 4100 yet: not started yet
+	w.barrier()
+
+	// The process shows up with no run dir event; only a sync sees it.
+	f.WriteProcess(4100, "/usr/bin/kvm", "-id", "100")
+	require.Eventually(t, func() bool {
+		return slices.Contains(w.events(), "start 100 4100")
+	}, 5*time.Second, time.Millisecond)
+
+	events := w.events()
+	start := slices.Index(events, "start 100 4100")
+	assert.Equal(t, "running map[100:4100]", events[start-1], "the sync runs before the start")
+
+	f.WritePIDFile(100, "4100\n")
+	w.barrier()
+
+	starts := 0
+	for _, e := range w.events() {
+		if e == "start 100 4100" {
+			starts++
+		}
+	}
+
+	assert.Equal(t, 1, starts, "one VM start")
 }
 
 func TestWatchSyncsPeriodically(t *testing.T) {

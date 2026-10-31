@@ -380,11 +380,13 @@ time possibly with an empty file, and never checks the PID is that guest's QEMU.
   pending look are forgotten. A pid file left by a dead process gets no synthetic stop;
   the sync leaves the guest out.
 - **Sync** — at start, every `SyncInterval`, and after a watcher error (events may have
-  been lost) — passes `List`'s running, non-template guests to `VMsRunning` and seeds the
-  reported PIDs, so a later `Write` of a PID the sync already saw is no start (a
-  scheduler restarted on a node of running guests). A guest with a pending look (not
-  started yet, or a `VMStarted` retry) is not seeded: that look goes on and reports the
-  start, which a sync seen first would otherwise swallow. A failed or partial list
+  been lost) — passes `List`'s running, non-template guests to `VMsRunning`. The first
+  sync seeds the reported PIDs, so a later `Write` of a PID it already saw is no start
+  (a scheduler restarted on a node of running guests). A later sync instead reports,
+  after `VMsRunning`, the start of each running guest whose PID was never reported: its
+  file events may still be queued behind the sync, and would then find the PID
+  reported. A guest with a pending look (not started yet, or a `VMStarted` retry) is
+  left to that look. A guest no longer running is forgotten. A failed or partial list
   (`*ListError`) calls nothing and is retried with backoff.
 
 LXC guests are not watched.

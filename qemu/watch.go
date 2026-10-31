@@ -177,11 +177,14 @@ type watchLoop struct {
 	handler EventHandler
 	opts    WatchOptions
 
-	// reported is the PID last reported as started, or seen running by a
-	// sync while no look was pending, for each guest.
+	// reported is the PID last reported as started, or seen running by the
+	// first sync while no look was pending, for each running guest.
 	reported map[int]int
 	// pending is each guest's next look, if one is due.
 	pending map[int]*pendingStart
+	// synced is set once a sync has listed the guests: later syncs report
+	// the starts they find.
+	synced bool
 
 	// syncDue is when a failed sync is retried; zero if none is.
 	syncDue time.Time
@@ -306,6 +309,12 @@ func (w *watchLoop) look(ctx context.Context, vmid int, prev *pendingStart) {
 		}
 	}
 
+	w.start(ctx, vmid, pid, prev)
+}
+
+// start reports guest vmid's start as process pid, and has it retried if
+// the handler fails. prev is the pending look this one retries, if any.
+func (w *watchLoop) start(ctx context.Context, vmid, pid int, prev *pendingStart) {
 	if err := w.handler.VMStarted(ctx, vmid, pid); err != nil {
 		w.schedule(vmid, pid, prev)
 
@@ -330,10 +339,13 @@ func (w *watchLoop) startSync(ctx context.Context) {
 	w.sync(ctx)
 }
 
-// sync passes the running guests to the handler, and seeds the reported
-// PIDs of those with no pending look: a pending look reports its own
-// start. A failed sync, a partial list included, tells the handler nothing
-// and is retried with backoff, as retry number syncAttempts.
+// sync passes the running guests to the handler. The first sync seeds the
+// reported PIDs of those with no pending look: they ran before Watch. A
+// later sync reports the start of each that has no pending look and whose
+// PID was never reported, since its file events may still be queued behind
+// the sync. A pending look reports its own start. A failed sync, a partial
+// list included, tells the handler nothing and is retried with backoff, as
+// retry number syncAttempts.
 func (w *watchLoop) sync(ctx context.Context) {
 	guests, err := w.client.List(ctx, ListFilter{Status: VMStatusRunning, SkipTemplates: true})
 	if err != nil {
@@ -347,13 +359,32 @@ func (w *watchLoop) sync(ctx context.Context) {
 	running := make(map[int]int, len(guests))
 	for _, g := range guests {
 		running[g.VMID] = g.PID
+	}
 
-		if _, ok := w.pending[g.VMID]; !ok {
-			w.reported[g.VMID] = g.PID
+	// A guest no longer running lost its pid file unseen.
+	for vmid := range w.reported {
+		if _, ok := running[vmid]; !ok {
+			delete(w.reported, vmid)
 		}
 	}
 
 	w.handler.VMsRunning(ctx, running)
+
+	for _, g := range guests {
+		if _, ok := w.pending[g.VMID]; ok || w.reported[g.VMID] == g.PID {
+			continue
+		}
+
+		if !w.synced {
+			w.reported[g.VMID] = g.PID
+
+			continue
+		}
+
+		w.start(ctx, g.VMID, g.PID, nil)
+	}
+
+	w.synced = true
 }
 
 // pidFileVMID returns the VMID a pid file is named after; false if name is
