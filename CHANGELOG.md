@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+
+### Features
+
+* **qemu:** add `Qemu().Watch`, a blocking loop that turns the run dir into checked VM start, VM stop and running-guests events (`EventHandler`, `WatchOptions`); `fakelocal` gains `SetRunning`, `SetStopped`, `WritePIDFile` and `WriteProcess` to drive it
+
 ## [0.1.0](https://github.com/sergelogvinov/go-proxmox-local/compare/v0.0.1...v0.1.0) (2026-09-25)
 
 

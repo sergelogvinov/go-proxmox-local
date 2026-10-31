@@ -101,26 +101,62 @@ func WithLXCGuest(vmid int, content string) Option {
 // WithRunning seeds the fake root with a running QEMU process for guest
 // vmid, as pid: run/qemu-server/<vmid>.pid holding pid, and a
 // proc/<pid>/cmdline naming the guest the way a real QEMU's does. Pair it
-// with WithGuest for the guest's config.
+// with WithGuest for the guest's config. See SetRunning for the same at
+// run time.
 func WithRunning(vmid, pid int) Option {
 	return func(f *Fake) {
 		f.t.Helper()
 
-		pidFile := filepath.Join(f.root, "run", "qemu-server", strconv.Itoa(vmid)+".pid")
-		procDir := filepath.Join(f.root, "proc", strconv.Itoa(pid))
-		cmdline := strings.Join([]string{"/usr/bin/kvm", "-id", strconv.Itoa(vmid), ""}, "\x00")
+		f.SetRunning(vmid, pid)
+	}
+}
 
-		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
-			f.t.Fatalf("fakelocal: WithRunning(%d, %d): %v", vmid, pid, err)
-		}
+// SetRunning starts guest vmid as process pid, the way QEMU does: its
+// proc/<pid>/cmdline naming the guest first, then
+// run/qemu-server/<vmid>.pid created and written with pid — so a
+// watcher of the run dir sees a Create and then a Write.
+func (f *Fake) SetRunning(vmid, pid int) {
+	f.t.Helper()
 
-		if err := os.MkdirAll(procDir, 0o755); err != nil {
-			f.t.Fatalf("fakelocal: WithRunning(%d, %d): %v", vmid, pid, err)
-		}
+	f.WriteProcess(pid, "/usr/bin/kvm", "-id", strconv.Itoa(vmid))
+	f.WritePIDFile(vmid, strconv.Itoa(pid)+"\n")
+}
 
-		if err := os.WriteFile(filepath.Join(procDir, "cmdline"), []byte(cmdline), 0o600); err != nil {
-			f.t.Fatalf("fakelocal: WithRunning(%d, %d): %v", vmid, pid, err)
-		}
+// SetStopped stops guest vmid: its run/qemu-server/<vmid>.pid is removed.
+// The process's proc entry is left in place, as a reused PID would be.
+func (f *Fake) SetStopped(vmid int) {
+	f.t.Helper()
+
+	if err := os.Remove(f.pidPath(vmid)); err != nil {
+		f.t.Fatalf("fakelocal: SetStopped(%d): %v", vmid, err)
+	}
+}
+
+// WritePIDFile writes run/qemu-server/<vmid>.pid with content verbatim —
+// empty, garbage or a PID — for a test of what a reader makes of it.
+func (f *Fake) WritePIDFile(vmid int, content string) {
+	f.t.Helper()
+
+	if err := os.WriteFile(f.pidPath(vmid), []byte(content), 0o600); err != nil {
+		f.t.Fatalf("fakelocal: WritePIDFile(%d): %v", vmid, err)
+	}
+}
+
+// WriteProcess writes proc/<pid>/cmdline as process pid's command line,
+// args NUL-separated as the kernel presents them — e.g. a process that
+// is not a QEMU, or the QEMU of another guest.
+func (f *Fake) WriteProcess(pid int, args ...string) {
+	f.t.Helper()
+
+	dir := filepath.Join(f.root, "proc", strconv.Itoa(pid))
+	cmdline := strings.Join(append(args, ""), "\x00")
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		f.t.Fatalf("fakelocal: WriteProcess(%d): %v", pid, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(cmdline), 0o600); err != nil {
+		f.t.Fatalf("fakelocal: WriteProcess(%d): %v", pid, err)
 	}
 }
 
@@ -243,6 +279,11 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 	default:
 		return nil, fmt.Errorf("fakelocal: unknown command %q", name)
 	}
+}
+
+// pidPath returns the fake tree's on-disk path for vmid's pid file.
+func (f *Fake) pidPath(vmid int) string {
+	return filepath.Join(f.root, "run", "qemu-server", strconv.Itoa(vmid)+".pid")
 }
 
 // guestPath returns the fake tree's on-disk path for vmid's config file
