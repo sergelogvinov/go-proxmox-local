@@ -29,7 +29,7 @@ import (
 // Client is the entry point for driving a Proxmox VE hypervisor from the
 // node itself. Obtain resource-scoped handles from its Qemu()/Cluster()
 // methods; Client itself carries only the shared configuration and the
-// command-execution seam (see Run, ConfigDir, RunDir), which the cluster
+// command-execution seam (see Run, ConfigDir, RunDir, ProcDir), which the cluster
 // and qemu subpackages consume through their own Env interfaces, so that
 // neither needs to import this package (which would cycle back to them).
 type Client struct {
@@ -54,6 +54,10 @@ func New(opts ...Option) (*Client, error) {
 
 	if cfg.runDir == "" {
 		cfg.runDir = filepath.Join(cfg.root, "run/qemu-server")
+	}
+
+	if cfg.procDir == "" {
+		cfg.procDir = filepath.Join(cfg.root, "proc")
 	}
 
 	if cfg.runner == nil {
@@ -104,4 +108,10 @@ func (c *Client) ConfigDir() string {
 // WithRoot).
 func (c *Client) RunDir() string {
 	return c.cfg.runDir
+}
+
+// ProcDir returns the procfs mount a running guest's QEMU process is
+// looked up in (default "/proc", or "<root>/proc" under WithRoot).
+func (c *Client) ProcDir() string {
+	return c.cfg.procDir
 }

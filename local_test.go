@@ -31,6 +31,7 @@ func TestNewDefaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "/etc/pve", c.ConfigDir())
 	assert.Equal(t, "/run/qemu-server", c.RunDir())
+	assert.Equal(t, "/proc", c.ProcDir())
 }
 
 func TestNewWithRoot(t *testing.T) {
@@ -38,6 +39,7 @@ func TestNewWithRoot(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join("/srv/fake-root", "etc/pve"), c.ConfigDir())
 	assert.Equal(t, filepath.Join("/srv/fake-root", "run/qemu-server"), c.RunDir())
+	assert.Equal(t, filepath.Join("/srv/fake-root", "proc"), c.ProcDir())
 }
 
 func TestNewWithRootAndExplicitDirs(t *testing.T) {
@@ -52,6 +54,10 @@ func TestNewWithRootAndExplicitDirs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "/custom/pve", after.ConfigDir())
 	assert.Equal(t, filepath.Join("/srv/fake-root", "run/qemu-server"), after.RunDir())
+
+	proc, err := New(WithProcDir("/custom/proc"), WithRoot("/srv/fake-root"))
+	require.NoError(t, err)
+	assert.Equal(t, "/custom/proc", proc.ProcDir())
 }
 
 func TestRunNotInstalled(t *testing.T) {

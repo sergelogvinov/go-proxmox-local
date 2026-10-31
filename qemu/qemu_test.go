@@ -37,6 +37,8 @@ import (
 // qemuServerDir), these tests are t.Parallel()-safe.
 type fakeEnv struct {
 	configDir string
+	runDir    string
+	procDir   string
 	ran       [][]string
 	runErr    error
 }
@@ -49,13 +51,23 @@ func (e *fakeEnv) Run(_ context.Context, name string, args ...string) ([]byte, e
 
 func (e *fakeEnv) ConfigDir() string { return e.configDir }
 
+func (e *fakeEnv) RunDir() string { return e.runDir }
+
+func (e *fakeEnv) ProcDir() string { return e.procDir }
+
 func newTestClient(t *testing.T) (*Client, *fakeEnv) {
 	t.Helper()
 
 	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "qemu-server"), 0o755))
+	env := &fakeEnv{
+		configDir: filepath.Join(dir, "etc/pve"),
+		runDir:    filepath.Join(dir, "run/qemu-server"),
+		procDir:   filepath.Join(dir, "proc"),
+	}
 
-	env := &fakeEnv{configDir: dir}
+	for _, d := range []string{filepath.Join(env.configDir, "qemu-server"), env.runDir, env.procDir} {
+		require.NoError(t, os.MkdirAll(d, 0o755))
+	}
 
 	return New(env), env
 }

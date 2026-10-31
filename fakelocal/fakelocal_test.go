@@ -127,3 +127,19 @@ func TestFakeLXCCreateThenUpdate(t *testing.T) {
 	_, err := client.LXC().Get(context.Background(), 201)
 	require.Error(t, err, "container should be gone after Delete")
 }
+
+func TestFakeRunningGuest(t *testing.T) {
+	f := New(t,
+		WithGuest(100, "name: running-vm\n"),
+		WithGuest(101, "name: stopped-vm\n"),
+		WithRunning(100, 4242),
+	)
+	client := f.Client()
+
+	guests, err := client.Qemu().List(context.Background(), qemu.ListFilter{Status: qemu.VMStatusRunning})
+	require.NoError(t, err)
+	require.Len(t, guests, 1)
+	assert.Equal(t, 100, guests[0].VMID)
+	assert.Equal(t, 4242, guests[0].PID)
+	assert.Equal(t, "running-vm", guests[0].Config.Name)
+}

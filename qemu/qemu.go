@@ -24,7 +24,9 @@ package qemu
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,6 +44,10 @@ import (
 type Env interface {
 	Run(ctx context.Context, name string, args ...string) (stdout []byte, err error)
 	ConfigDir() string
+	// RunDir holds running guests' <vmid>.pid files.
+	RunDir() string
+	// ProcDir is the procfs mount a guest's process is looked up in.
+	ProcDir() string
 }
 
 // Client provides QEMU guest configuration read access and lifecycle
@@ -109,33 +115,50 @@ func (c *Client) Get(ctx context.Context, vmid int) (*Config, error) {
 
 // Guest pairs a VM id with the config found for it — List's result
 // element, since a Config on its own does not carry the id it was read
-// from.
+// from — and with whether its QEMU process runs on this node.
 type Guest struct {
 	VMID   int
 	Config *Config
+
+	// Status is VMStatusRunning when the guest's QEMU process is alive,
+	// VMStatusStopped otherwise.
+	Status VMStatus
+	// PID is the guest's QEMU process when it runs, 0 otherwise.
+	PID int
 }
 
-// ListFilter filters the entries List returns. Name is applied
-// client-side after each config is decoded, same as Match; there is no
-// server-side filtering here, unlike go-proxmox-rest's
-// cluster.ListFilter, since List is a directory scan, not an API call.
+// ListFilter filters the entries List returns. Every field is applied
+// client-side after each config is decoded; there is no server-side
+// filtering here, unlike go-proxmox-rest's cluster.ListFilter, since List
+// is a directory scan, not an API call.
 type ListFilter struct {
 	// Name restricts entries to guests with this exact Config.Name. Empty
 	// disables the filter.
 	Name string
 
-	// Match, when set, is evaluated last for each config that passed Name
-	// above; the entry is kept only if Match returns true. Use it for
-	// conditions List can't express directly. An error return aborts
+	// Status restricts entries to guests in this running state. Empty
+	// disables the filter.
+	Status VMStatus
+
+	// SkipTemplates excludes guests flagged as templates (Config.Template).
+	SkipTemplates bool
+
+	// Match, when set, is evaluated last for each config that passed the
+	// filters above; the entry is kept only if Match returns true. Use it
+	// for conditions List can't express directly. An error return aborts
 	// List, and that error is returned to the caller.
 	Match func(*Config) (bool, error)
 }
 
 // List scans every QEMU guest config file in the configured config
-// directory and returns the id/config of every VM matched by filter. A
-// zero ListFilter matches every VM. Nothing matching is not an error: it
-// returns an empty slice. A config that fails to read or parse is
-// skipped rather than aborting the scan.
+// directory and returns the id/config/status of every VM matched by
+// filter, in VM id order. A zero ListFilter matches every VM. Nothing
+// matching is not an error: it returns an empty slice.
+//
+// A config that is gone by the time it is read, or that does not parse,
+// is skipped. A config that cannot be read is skipped too, but reported:
+// List then returns the guests it did read together with a *ListError
+// naming the skipped VM ids.
 func (c *Client) List(ctx context.Context, filter ListFilter) ([]Guest, error) {
 	dir := filepath.Join(c.env.ConfigDir(), "qemu-server")
 
@@ -144,7 +167,7 @@ func (c *Client) List(ctx context.Context, filter ListFilter) ([]Guest, error) {
 		return nil, fmt.Errorf("failed to read qemu-server directory: %w", err)
 	}
 
-	var guests []Guest
+	vmids := make([]int, 0, len(entries))
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -161,12 +184,42 @@ func (c *Client) List(ctx context.Context, filter ListFilter) ([]Guest, error) {
 			continue // skip non-numeric filenames
 		}
 
+		vmids = append(vmids, vmid)
+	}
+
+	sort.Ints(vmids)
+
+	var (
+		guests  []Guest
+		skipped map[int]error
+	)
+
+	for _, vmid := range vmids {
 		cfg, err := c.Get(ctx, vmid)
 		if err != nil {
-			continue // skip VMs that can't be read
+			// A read error is an *fs.PathError; a missing file is
+			// ErrNotFound and a parse or decode error is neither.
+			if pathErr := (*fs.PathError)(nil); errors.As(err, &pathErr) {
+				if skipped == nil {
+					skipped = map[int]error{}
+				}
+
+				skipped[vmid] = err
+			}
+
+			continue
 		}
 
 		if filter.Name != "" && cfg.Name != filter.Name {
+			continue
+		}
+
+		if filter.SkipTemplates && cfg.Template != nil && *cfg.Template {
+			continue
+		}
+
+		status, pid := c.status(vmid)
+		if filter.Status != "" && status != filter.Status {
 			continue
 		}
 
@@ -181,7 +234,11 @@ func (c *Client) List(ctx context.Context, filter ListFilter) ([]Guest, error) {
 			}
 		}
 
-		guests = append(guests, Guest{VMID: vmid, Config: cfg})
+		guests = append(guests, Guest{VMID: vmid, Config: cfg, Status: status, PID: pid})
+	}
+
+	if skipped != nil {
+		return guests, &ListError{Skipped: skipped}
 	}
 
 	return guests, nil

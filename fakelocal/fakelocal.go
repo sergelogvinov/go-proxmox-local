@@ -19,7 +19,8 @@ limitations under the License.
 // (cmd/proxmox-scheduler above all) can drive a full create-then-update
 // reconcile against a *local.Client without a hypervisor.
 //
-// A Fake is a temp root directory tree (etc/pve/qemu-server/*.conf) plus
+// A Fake is a temp root directory tree (etc/pve/qemu-server/*.conf, and
+// run/qemu-server/*.pid with proc/<pid>/cmdline for running guests) plus
 // a Runner that interprets `qm create`/`qm set`/`qm destroy`,
 // `pvecm status` and `pvesh get /cluster/nextid` against it. Writes go
 // through the real conf package's reader on the way back out — only the
@@ -97,14 +98,40 @@ func WithLXCGuest(vmid int, content string) Option {
 	}
 }
 
+// WithRunning seeds the fake root with a running QEMU process for guest
+// vmid, as pid: run/qemu-server/<vmid>.pid holding pid, and a
+// proc/<pid>/cmdline naming the guest the way a real QEMU's does. Pair it
+// with WithGuest for the guest's config.
+func WithRunning(vmid, pid int) Option {
+	return func(f *Fake) {
+		f.t.Helper()
+
+		pidFile := filepath.Join(f.root, "run", "qemu-server", strconv.Itoa(vmid)+".pid")
+		procDir := filepath.Join(f.root, "proc", strconv.Itoa(pid))
+		cmdline := strings.Join([]string{"/usr/bin/kvm", "-id", strconv.Itoa(vmid), ""}, "\x00")
+
+		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+			f.t.Fatalf("fakelocal: WithRunning(%d, %d): %v", vmid, pid, err)
+		}
+
+		if err := os.MkdirAll(procDir, 0o755); err != nil {
+			f.t.Fatalf("fakelocal: WithRunning(%d, %d): %v", vmid, pid, err)
+		}
+
+		if err := os.WriteFile(filepath.Join(procDir, "cmdline"), []byte(cmdline), 0o600); err != nil {
+			f.t.Fatalf("fakelocal: WithRunning(%d, %d): %v", vmid, pid, err)
+		}
+	}
+}
+
 // New creates a Fake rooted at a fresh t.TempDir().
 func New(t testing.TB, opts ...Option) *Fake {
 	t.Helper()
 
 	f := &Fake{t: t, root: t.TempDir(), quorum: true, nextID: 100}
 
-	for _, subdir := range []string{"qemu-server", "lxc"} {
-		if err := os.MkdirAll(filepath.Join(f.root, "etc", "pve", subdir), 0o755); err != nil {
+	for _, dir := range []string{"etc/pve/qemu-server", "etc/pve/lxc", "run/qemu-server", "proc"} {
+		if err := os.MkdirAll(filepath.Join(f.root, dir), 0o755); err != nil {
 			t.Fatalf("fakelocal: %v", err)
 		}
 	}
