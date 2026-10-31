@@ -74,6 +74,7 @@ go-proxmox-local
 │   ├── process.go          // ParseVfioPCIDevices(cmdlineArgs)
 │   ├── status.go           // running state from run/qemu-server/*.pid + proc/<pid>/cmdline,
 │   │                       //   VMStatus aliases, ListError
+│   ├── watch.go            // Watch: VM start/stop/running events from the run dir
 │   └── types.go            // Config, CPU, HostPCI, Memory, NUMA, Tags — aliases
 ├── lxc/                    // mirrors qemu/'s shape, for containers
 │   ├── lxc.go              // Client: Get, List, ConfigFile, Create, Update, Delete (pct)
@@ -83,7 +84,8 @@ go-proxmox-local
 │   └── storage.go          // Client: Status (pvesm status), List (pvesm list)
 ├── fakelocal/              // public test double: temp root + scripted Runner
 │   └── fakelocal.go        // interprets qm/pct create|set|destroy, pvecm status,
-│                           //   pvesh get /cluster/nextid; seeds running guests
+│                           //   pvesh get /cluster/nextid; seeds, starts and stops
+│                           //   running guests
 ├── internal/
 │   ├── errdefs/            // sentinel errors, shared by root+subpackages without a cycle
 │   ├── params/             // ported from go-proxmox-rest/internal/params (§6.4)
@@ -338,6 +340,53 @@ check short of patching the caller's `cfg.Digest` handling.
 
 ---
 
+## The watch loop
+
+```go
+func (c *Client) Watch(ctx context.Context, handler EventHandler, opts WatchOptions) error
+
+type EventHandler interface {
+    VMStarted(ctx context.Context, vmid, pid int) error // a VM start; an error retries it
+    VMStopped(ctx context.Context, vmid int)            // <vmid>.pid removed
+    VMsRunning(ctx context.Context, running map[int]int) // every sync: VMID to PID
+}
+
+type WatchOptions struct {
+    SyncInterval time.Duration // plus one sync at start; 0 = only at start
+    MaxRetries   int
+    BaseDelay    time.Duration // exponential backoff, default 2s
+    MaxDelay     time.Duration // default 30s
+}
+```
+
+`Qemu().Watch` blocks until `ctx` is canceled, watching the run dir with fsnotify, and
+calls the handler from its own goroutine, one call at a time. It lives here, not in each
+on-node agent, because this module owns both halves of the question "did this guest just
+start": the pid files' location (`WithRunDir`) and the running check (`status.go`). A
+caller's own loop got this wrong — QEMU creates `<vmid>.pid` and then writes the PID into
+it, so a loop treating each `Create`/`Write` as a start sees one start twice, the first
+time possibly with an empty file, and never checks the PID is that guest's QEMU.
+
+- **A file event means "look again", not "started".** `VMStarted(vmid, pid)` is called
+  once the running check passes (a positive PID whose cmdline has `-id <vmid>`) and
+  `(vmid, pid)` is not the pair last reported. A new PID is a restart, reported again.
+- **Not started yet** — an empty or unparsable pid file, a PID of another process — is
+  looked at again with backoff, not reported and not a handler error.
+- **Retries check again.** A `VMStarted` error is retried with backoff up to `MaxRetries`;
+  each retry runs the running check first and is dropped if the guest no longer runs as
+  that PID. A file event replaces a pending look rather than queueing another.
+- **Stop** is a `Remove` of `<vmid>.pid`: `VMStopped`, and the guest's reported PID and
+  pending look are forgotten. A pid file left by a dead process gets no synthetic stop;
+  the sync leaves the guest out.
+- **Sync** — at start, every `SyncInterval`, and after a watcher error (events may have
+  been lost) — passes `List`'s running, non-template guests to `VMsRunning` and seeds the
+  reported PIDs, so a later `Write` of a PID the sync already saw is no start. A failed or
+  partial list (`*ListError`) calls nothing and is retried with backoff.
+
+LXC guests are not watched.
+
+---
+
 ## Testing
 
 `fakelocal` is the local counterpart to `go-proxmox-rest`'s `fakeapi`:
@@ -371,6 +420,10 @@ What `fakelocal` provides today:
   covers).
 - `WithRunning(vmid, pid)` to seed a running QEMU guest: its `run/qemu-server/<vmid>.pid`
   and a `proc/<pid>/cmdline` naming it.
+- `SetRunning`/`SetStopped` to start and stop a guest while a test runs (a `Create` then a
+  `Write` of the pid file, as QEMU makes them; a `Remove`), and `WritePIDFile`/
+  `WriteProcess` for the odd cases — an empty pid file, a PID reused by another process —
+  so a test drives `Watch` ("The watch loop" above) against the fake run and proc dirs.
 
 What it does *not* provide (open items, §12): `etc/pve/.members`/`.vmlist`, the running
 state of LXC containers, and fault injection (a scripted command failure/lock
@@ -466,6 +519,13 @@ err = client.Qemu().Stop(ctx, vmid)                // qm stop
 err = client.Qemu().Reboot(ctx, vmid)              // qm reboot
 
 devs := qemu.ParseVfioPCIDevices(cmdlineArgs)
+
+// qemu — guest lifecycle events (blocks until ctx is canceled)
+err = client.Qemu().Watch(ctx, handler, qemu.WatchOptions{
+    SyncInterval: time.Minute,
+    MaxRetries:   5,
+})                                                 // handler: qemu.EventHandler —
+                                                    //   VMStarted, VMStopped, VMsRunning
 
 // lxc — mirrors qemu exactly, via pct
 cfg, err := client.LXC().Get(ctx, 200)
